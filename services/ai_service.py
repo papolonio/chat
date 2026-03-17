@@ -55,6 +55,14 @@ NÃO use este caso para:
 - Mês + ano explícito: "janeiro de 2026", "fevereiro de 2026", "março de 2025" etc.
   → Mês + ano = período completo do mês inteiro. NUNCA pergunte o dia específico.
 - Ano explícito: "em 2025", "no ano de 2024" → período do ano inteiro.
+- Pedidos de análise por DIMENSÃO sem métrica explícita → use FATURAMENTO como default.
+  NUNCA pergunte qual métrica quando o usuário informou apenas a dimensão desejada.
+  Exemplos que jamais devem gerar CLARIFICACAO:
+    "preciso entender o mesmo período por produto" → Top produtos por faturamento (mesmo período)
+    "quero ver por cliente" → Top clientes por faturamento (mesmo período)
+    "e os vendedores?" → Top vendedores por faturamento (mesmo período)
+    "me mostre por região" → Faturamento por estado (mesmo período)
+    "entender por cidade" → Faturamento por cidade (mesmo período)
 → Retorne: CLARIFICACAO: <pergunta pedindo o dado faltante>
 
 ━━━ CASO C — Consulta de dados (requer SQL) ━━━
@@ -136,7 +144,37 @@ Exemplos:
   → Top clientes por faturamento em janeiro de 2026
 
   Histórico: relatório de PRODUTOS de janeiro/2026. Atual: "e por região?" ou "e por estado?"
-  → Faturamento por estado em janeiro de 2026"""
+  → Faturamento por estado em janeiro de 2026
+
+  Histórico: relatório de PRODUTOS de fevereiro/2026. Atual: "preciso entender o mesmo período por produto" ou "quero ver por produto"
+  → Top produtos por faturamento em fevereiro de 2026
+
+  Histórico: relatório de fevereiro/2026 por produto. Atual: "e por cliente?" ou "entender por cliente"
+  → Top clientes por faturamento em fevereiro de 2026
+
+  Histórico: relatório de fevereiro/2026 por produto. Atual: "e por vendedor?" ou "entender por vendedor"
+  → Top vendedores por faturamento em fevereiro de 2026
+
+  Histórico: relatório de fevereiro/2026 por produto. Atual: "e por região?" ou "entender por região"
+  → Faturamento por estado em fevereiro de 2026
+
+━━━ CASO D — Relatório completo (4 dimensões em paralelo) ━━━
+Quando o usuário pedir "relatório completo", "relatório geral", "visão geral completa" ou equivalentes,
+retorne no formato: RELATORIO_COMPLETO: <período resolvido>
+Resolva o período com as mesmas regras do CASO C (datas relativas, mês+ano, histórico).
+
+Exemplos:
+  Histórico: nenhum. Atual: "relatório completo de fevereiro de 2026" ou "relatório geral de fevereiro"
+  → RELATORIO_COMPLETO: fevereiro de 2026
+
+  Histórico: nenhum. Atual: "relatório completo desse mês" ou "relatório completo de março"
+  → RELATORIO_COMPLETO: {mes_atual}
+
+  Histórico: nenhum. Atual: "quero um relatório completo de 2025" ou "visão geral de 2025"
+  → RELATORIO_COMPLETO: ano de 2025
+
+  Histórico: faturamento de janeiro de 2026. Atual: "me dá o relatório completo desse período"
+  → RELATORIO_COMPLETO: janeiro de 2026"""
 
 
 def _build_resolver_prompt() -> str:
@@ -195,6 +233,11 @@ SELEÇÃO DE TABELA — REGRA CRÍTICA
 ▶ USE integralmix."fVendas" QUANDO:
   - A consulta precisa de COUNT(DISTINCT "Lancamento") — contagem exata de pedidos.
   - A consulta precisa de Ticket Médio (que depende de pedidos exatos).
+  - A consulta agrupa por "Cliente" ou "Vendedor" — SEMPRE use fVendas.
+    ⚠ CRÍTICO: agg_vendas_diarias tem múltiplas linhas por cliente/dia e por vendedor/dia;
+    o SUM(SUM()) OVER () ficará INCORRETO (inflado) nessa tabela para essas dimensões.
+    Isso vale para qualquer período — explícito ('2026-02-01') ou relativo (CURRENT_DATE).
+    GROUP BY "Cliente" → fVendas. GROUP BY "Vendedor" → fVendas. Sem exceção.
   - Coluna de valor:  "Valor"       (com aspas, V maiúsculo)
   - Coluna de data:   "DataEmissao" (com aspas, D e E maiúsculos)
   - ⚠ Não existe coluna faturamento (sem aspas) nesta tabela.
@@ -355,7 +398,8 @@ SELECT "Vendedor",
        SUM("Valor") / NULLIF(COUNT(DISTINCT "Lancamento"), 0) AS ticket_medio,
        SUM("Valor")                                            AS faturamento_total,
        COUNT(DISTINCT "Lancamento")                            AS qtd_pedidos,
-       SUM(SUM("Valor")) OVER ()                              AS total_geral_faturamento
+       SUM(SUM("Valor"))             OVER ()                  AS total_geral_faturamento,
+       SUM(COUNT(DISTINCT "Lancamento")) OVER ()              AS total_geral_pedidos
 FROM integralmix."fVendas"
 WHERE DATE_TRUNC('month', "DataEmissao") = DATE_TRUNC('month', CURRENT_DATE)
 GROUP BY "Vendedor"
@@ -366,12 +410,69 @@ LIMIT 20;
 
 -- Top clientes por faturamento em janeiro de 2026
 SELECT "Cliente",
-       SUM("Valor")                 AS faturamento_total,
-       COUNT(DISTINCT "Lancamento") AS qtd_pedidos,
-       SUM(SUM("Valor")) OVER ()    AS total_geral_faturamento
+       SUM("Valor")                        AS faturamento_total,
+       COUNT(DISTINCT "Lancamento")        AS qtd_pedidos,
+       SUM(SUM("Valor"))      OVER ()      AS total_geral_faturamento,
+       SUM(COUNT(DISTINCT "Lancamento")) OVER () AS total_geral_pedidos
 FROM integralmix."fVendas"
 WHERE "DataEmissao" >= '2026-01-01' AND "DataEmissao" < '2026-02-01'
 GROUP BY "Cliente"
+ORDER BY faturamento_total DESC
+LIMIT 20;
+
+---
+
+-- Top clientes por faturamento em fevereiro de 2026
+SELECT "Cliente",
+       SUM("Valor")                        AS faturamento_total,
+       COUNT(DISTINCT "Lancamento")        AS qtd_pedidos,
+       SUM(SUM("Valor"))      OVER ()      AS total_geral_faturamento,
+       SUM(COUNT(DISTINCT "Lancamento")) OVER () AS total_geral_pedidos
+FROM integralmix."fVendas"
+WHERE "DataEmissao" >= '2026-02-01' AND "DataEmissao" < '2026-03-01'
+GROUP BY "Cliente"
+ORDER BY faturamento_total DESC
+LIMIT 20;
+
+---
+
+-- Top clientes por faturamento deste mês
+SELECT "Cliente",
+       SUM("Valor")                        AS faturamento_total,
+       COUNT(DISTINCT "Lancamento")        AS qtd_pedidos,
+       SUM(SUM("Valor"))      OVER ()      AS total_geral_faturamento,
+       SUM(COUNT(DISTINCT "Lancamento")) OVER () AS total_geral_pedidos
+FROM integralmix."fVendas"
+WHERE DATE_TRUNC('month', "DataEmissao") = DATE_TRUNC('month', CURRENT_DATE)
+GROUP BY "Cliente"
+ORDER BY faturamento_total DESC
+LIMIT 20;
+
+---
+
+-- Top vendedores por faturamento deste mês
+SELECT "Vendedor",
+       SUM("Valor")                        AS faturamento_total,
+       COUNT(DISTINCT "Lancamento")        AS qtd_pedidos,
+       SUM(SUM("Valor"))      OVER ()      AS total_geral_faturamento,
+       SUM(COUNT(DISTINCT "Lancamento")) OVER () AS total_geral_pedidos
+FROM integralmix."fVendas"
+WHERE DATE_TRUNC('month', "DataEmissao") = DATE_TRUNC('month', CURRENT_DATE)
+GROUP BY "Vendedor"
+ORDER BY faturamento_total DESC
+LIMIT 20;
+
+---
+
+-- Top vendedores por faturamento em fevereiro de 2026 (data explícita)
+SELECT "Vendedor",
+       SUM("Valor")                        AS faturamento_total,
+       COUNT(DISTINCT "Lancamento")        AS qtd_pedidos,
+       SUM(SUM("Valor"))      OVER ()      AS total_geral_faturamento,
+       SUM(COUNT(DISTINCT "Lancamento")) OVER () AS total_geral_pedidos
+FROM integralmix."fVendas"
+WHERE "DataEmissao" >= '2026-02-01' AND "DataEmissao" < '2026-03-01'
+GROUP BY "Vendedor"
 ORDER BY faturamento_total DESC
 LIMIT 20;
 
@@ -488,8 +589,16 @@ REGRAS CRÍTICAS — TOLERÂNCIA ZERO PARA ALUCINAÇÃO:
   "nome" = VALOR real da célula (ex: "Fortaleza", "João Silva"), NUNCA o nome da coluna.
   Se não há agrupamento por entidade ou é série temporal → use [].
 
+  Para cada item em top_drivers, extraia também:
+  - "qtd_pedidos": valor da coluna "qtd_pedidos" ou "Lancamento" da linha, se existir. Caso contrário null.
+  - "ticket_medio_item": valor da coluna "ticket_medio" da linha, se existir.
+    ⚠ CRÍTICO: se a coluna "ticket_medio" já vier calculada no SQL (ex: ticket_medio = 54707.14),
+    copie esse valor DIRETAMENTE para "ticket_medio_item". Não calcule, não estime.
+    Se a coluna não existir nos dados → null.
+
 - Retorne APENAS o JSON, sem markdown, sem explicações.
-- NÃO inclua ticket_medio nem ticket_medio_item — calculados externamente."""
+- NÃO inclua campos ticket_medio nem ticket_medio (global) — calculados externamente.
+  Apenas "ticket_medio_item" dentro de cada objeto de top_drivers é permitido e deve ser extraído dos dados."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -641,6 +750,11 @@ def render_card(card_data: dict) -> str:
             medal  = medals[i] if i < len(medals) else f"{i+1}º"
             f_val  = d.get("faturamento") or 0
             part   = (f_val / base_fat * 100) if base_fat > 0 else 0
+            # Fallback: se parte > 100% o total_geral_faturamento veio de tabela errada;
+            # recalcula sobre a soma real dos drivers como base alternativa.
+            if part > 100:
+                base_alt = sum(d2.get("faturamento", 0) for d2 in drivers)
+                part = (f_val / base_alt * 100) if base_alt > 0 else 0
             p_val  = d.get("qtd_pedidos")
             tk_val = d.get("ticket_medio_item")
 
@@ -691,12 +805,18 @@ def _rows_limit_for_intent(standalone_intent: str) -> int:
 
 
 def _calculate_ticket_medio(card_data: dict) -> dict:
-    """Calcula ticket_medio global e ticket_medio_item por driver, tudo em Python."""
+    """Calcula ticket_medio global e ticket_medio_item por driver.
+    Se ticket_medio_item já vier dos dados (coluna calculada no SQL), preserva.
+    Só calcula em Python como fallback quando a coluna não existia no SQL."""
     fat = card_data.get("faturamento_total")
     ped = card_data.get("qtd_pedidos")
     card_data["ticket_medio"] = (fat / ped) if (fat and ped and ped > 0) else None
 
     for d in card_data.get("top_drivers") or []:
+        # Preserva ticket_medio_item se já veio extraído do SQL pelo Prompt C
+        if d.get("ticket_medio_item") is not None:
+            continue
+        # Fallback: calcula em Python se tiver faturamento + pedidos por item
         f_val = d.get("faturamento")
         p_val = d.get("qtd_pedidos")
         d["ticket_medio_item"] = (f_val / p_val) if (f_val and p_val and p_val > 0) else None
@@ -707,6 +827,43 @@ def _calculate_ticket_medio(card_data: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # API PÚBLICA
 # ─────────────────────────────────────────────────────────────────────────────
+
+def summarize_for_history(card_data: dict, standalone_intent: str) -> str:
+    """Gera resumo compacto do resultado para salvar no Redis.
+    Evita salvar o card Markdown completo (ruidoso e caro em tokens)."""
+    fat     = card_data.get("faturamento_total")
+    ped     = card_data.get("qtd_pedidos")
+    tkt     = card_data.get("ticket_medio")
+    serie   = card_data.get("serie_temporal") or []
+    drivers = card_data.get("top_drivers")    or []
+
+    parts = [f"Consulta: {standalone_intent}."]
+
+    if serie:
+        items = ", ".join(
+            f"{s['periodo']} → {_fmt_brl(s['faturamento'])}"
+            for s in serie[:3]
+        )
+        parts.append(f"Série: {items}{'...' if len(serie) > 3 else ''}.")
+    elif fat is not None:
+        parts.append(f"Faturamento total: {_fmt_brl(fat)}.")
+
+    if ped is not None:
+        parts.append(f"Pedidos: {_fmt_int(int(ped))}.")
+    if tkt is not None:
+        parts.append(f"Ticket médio: {_fmt_brl(tkt)}.")
+
+    if drivers:
+        top3 = "; ".join(
+            f"{d['nome']} ({_fmt_brl(d['faturamento'])})"
+            for d in drivers[:3]
+            if d.get("faturamento") is not None
+        )
+        if top3:
+            parts.append(f"Top 3: {top3}.")
+
+    return " ".join(parts)
+
 
 def resolve_intent(history: list[dict]) -> str:
     """Passo 1: Roteia e resolve o intent do usuário a partir do histórico.
@@ -799,6 +956,24 @@ def extract_card_data(standalone_intent: str, rows: list) -> dict:
     except json.JSONDecodeError:
         log.error("extract_card_data: falha ao parsear JSON do extrator: %s", raw)
         return {}
+
+    # ── Correção determinística: lê total_geral_* diretamente das linhas SQL ──
+    # O LLM às vezes confunde a coluna "faturamento_total" (valor por linha) com
+    # o campo de saída "faturamento_total" (total geral). Python lê sem ambiguidade.
+    if rows and "total_geral_faturamento" in rows[0]:
+        py_total = rows[0]["total_geral_faturamento"]
+        if py_total is not None:
+            if card_data.get("faturamento_total") != py_total:
+                log.warning(
+                    "extract_card_data: faturamento_total corrigido: LLM=%s → Python=%s",
+                    card_data.get("faturamento_total"), py_total,
+                )
+            card_data["faturamento_total"] = py_total
+
+    if rows and "total_geral_pedidos" in rows[0]:
+        py_ped = rows[0]["total_geral_pedidos"]
+        if py_ped is not None:
+            card_data["qtd_pedidos"] = int(py_ped)
 
     # Melhoria #4: ticket_medio calculado aqui, nunca pelo LLM
     return _calculate_ticket_medio(card_data)

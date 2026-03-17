@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import redis
 from flask import Flask, render_template, request, jsonify
@@ -15,7 +16,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-from services.ai_service import resolve_intent, generate_sql, fix_sql, extract_card_data, render_card
+from services.ai_service import resolve_intent, generate_sql, fix_sql, extract_card_data, render_card, summarize_for_history
 from services.db_service import execute_query, QueryError
 
 app = Flask(__name__)
@@ -38,8 +39,51 @@ def _get_history(session_id: str) -> list[dict]:
     return json.loads(raw) if raw else []
 
 
+# ---------------------------------------------------------------------------
+# Relatório completo
+# ---------------------------------------------------------------------------
+
+_RELATORIO_DIMENSOES = [
+    ("produto",   "Top produtos por faturamento em {periodo}"),
+    ("cliente",   "Top clientes por faturamento em {periodo}"),
+    ("vendedor",  "Top vendedores por faturamento em {periodo}"),
+    ("estado",    "Faturamento por estado em {periodo}"),
+]
+
+_CABECALHOS = {
+    "produto":  "## 📦 Produtos",
+    "cliente":  "## 👥 Clientes",
+    "vendedor": "## 🤝 Vendedores",
+    "estado":   "## 🗺️ Estados / Regiões",
+}
+
+
+def _executar_dimensao(label: str, intent: str) -> tuple[str, str]:
+    """Executa o pipeline completo (SQL → banco → card) para uma dimensão.
+    Retorna (label, card_markdown). Em caso de erro retorna card com aviso."""
+    cabecalho = _CABECALHOS.get(label, f"## {label.title()}")
+    try:
+        sql = generate_sql(intent)
+        if sql.strip().upper() == "PERGUNTA_INVALIDA":
+            raise ValueError("SQL gerou PERGUNTA_INVALIDA")
+        try:
+            rows = execute_query(sql)
+        except QueryError as e:
+            sql_corrigido = fix_sql(broken_sql=e.sql, db_error=e.db_error)
+            rows = execute_query(sql_corrigido)
+        if not rows:
+            return label, f"{cabecalho}\n\n_Sem dados disponíveis para {label} neste período._"
+        card_data = extract_card_data(intent, rows)
+        return label, f"{cabecalho}\n\n{render_card(card_data)}"
+    except Exception as exc:
+        log.error("Relatório completo — falha em '%s': %s", label, exc)
+        return label, f"{cabecalho}\n\n⚠️ Não foi possível carregar dados de **{label}** para este período."
+
+
 def _save_history(session_id: str, history: list[dict]) -> None:
-    redis_client.setex(f"session:{session_id}", SESSION_TTL, json.dumps(history))
+    # Trunca antes de persistir — garante que o Redis nunca cresce além do limite
+    trimmed = history[-MAX_HISTORY_MSGS:]
+    redis_client.setex(f"session:{session_id}", SESSION_TTL, json.dumps(trimmed))
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +129,29 @@ def chat():
         history.append({"role": "assistant", "content": answer})
         _save_history(session_id, history)
         return jsonify({"answer": answer, "clarification": True})
+
+    if resolved.upper().startswith("RELATORIO_COMPLETO:"):
+        periodo = resolved[len("RELATORIO_COMPLETO:"):].strip()
+        log.info("Relatório completo solicitado para: %s", periodo)
+
+        intents = [(label, tmpl.format(periodo=periodo)) for label, tmpl in _RELATORIO_DIMENSOES]
+        resultados: dict[str, str] = {}
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {pool.submit(_executar_dimensao, label, intent): label
+                       for label, intent in intents}
+            for future in as_completed(futures):
+                label, card = future.result()
+                resultados[label] = card
+
+        # Mantém a ordem original das dimensões
+        cards_ordenados = [resultados[label] for label, _ in _RELATORIO_DIMENSOES]
+        answer = "\n\n---\n\n".join(cards_ordenados)
+
+        history_summary = f"Relatório completo de {periodo} (produto, cliente, vendedor, estado)."
+        history.append({"role": "assistant", "content": history_summary})
+        _save_history(session_id, history)
+        return jsonify({"answer": answer})
 
     # 3. GERAÇÃO DE SQL — recebe apenas o intent standalone (sem histórico bruto)
     #    Elimina context bleeding: o gerador nunca vê perguntas anteriores.
@@ -142,7 +209,10 @@ def chat():
         }
         log.info("chart_data gerado com %d pontos.", len(serie))
 
-    history.append({"role": "assistant", "content": answer})
+    # Salva no histórico um resumo compacto (não o card Markdown completo)
+    # para não poluir o contexto enviado ao resolver nos turnos seguintes.
+    history_content = summarize_for_history(card_data, resolved)
+    history.append({"role": "assistant", "content": history_content})
     _save_history(session_id, history)
 
     return jsonify({"answer": answer, "chart_data": chart_data})

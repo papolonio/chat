@@ -11,7 +11,9 @@
       "Bash(python -m pip install \"SQLAlchemy>=2.0.30\" \"psycopg2-binary>=2.9.9\" \"pymssql>=2.3.1\" \"python-dotenv>=1.0.1\" --quiet)",
       "Bash(python -c \"import dotenv, sqlalchemy, psycopg2, pymssql; print\\(''OK''\\)\")",
       "Bash(python -:*)",
-      "Bash(2)"
+      "Bash(2)",
+      "Bash(python -c \":*)",
+      "Bash(source .env)"
     ]
   }
 }
