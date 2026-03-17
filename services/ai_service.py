@@ -244,8 +244,7 @@ SELECT "Vendedor",
        SUM("Valor") / NULLIF(COUNT(DISTINCT "Lancamento"), 0)  AS ticket_medio,
        SUM("Valor")                                             AS faturamento_total,
        COUNT(DISTINCT "Lancamento")                             AS qtd_pedidos,
-       SUM(SUM("Valor"))       OVER ()                         AS total_geral_faturamento,
-       COUNT(DISTINCT "Lancamento") OVER ()                    AS total_geral_pedidos
+       SUM(SUM("Valor")) OVER ()                               AS total_geral_faturamento
 FROM integralmix."fVendas"
 WHERE DATE_TRUNC('month', "DataEmissao") = DATE_TRUNC('month', CURRENT_DATE)
 GROUP BY "Vendedor"
@@ -256,10 +255,9 @@ LIMIT 20;
 
 -- Instrução: "Top clientes por faturamento em janeiro de 2026"
 SELECT "Cliente",
-       SUM("Valor")                                    AS faturamento_total,
-       COUNT(DISTINCT "Lancamento")                    AS qtd_pedidos,
-       SUM(SUM("Valor"))       OVER ()                 AS total_geral_faturamento,
-       COUNT(DISTINCT "Lancamento") OVER ()            AS total_geral_pedidos
+       SUM("Valor")                AS faturamento_total,
+       COUNT(DISTINCT "Lancamento") AS qtd_pedidos,
+       SUM(SUM("Valor")) OVER ()   AS total_geral_faturamento
 FROM integralmix."fVendas"
 WHERE "DataEmissao" >= '2026-01-01' AND "DataEmissao" < '2026-02-01'
 GROUP BY "Cliente"
@@ -270,10 +268,9 @@ LIMIT 20;
 
 -- Instrução: "Melhor cliente em Fortaleza em janeiro de 2026"
 SELECT "Cliente",
-       SUM("Valor")                                    AS faturamento_total,
-       COUNT(DISTINCT "Lancamento")                    AS qtd_pedidos,
-       SUM(SUM("Valor"))       OVER ()                 AS total_geral_faturamento,
-       COUNT(DISTINCT "Lancamento") OVER ()            AS total_geral_pedidos
+       SUM("Valor")                AS faturamento_total,
+       COUNT(DISTINCT "Lancamento") AS qtd_pedidos,
+       SUM(SUM("Valor")) OVER ()   AS total_geral_faturamento
 FROM integralmix."fVendas"
 WHERE "Cidade" ILIKE '%fortaleza%'
   AND "DataEmissao" >= '2026-01-01' AND "DataEmissao" < '2026-02-01'
