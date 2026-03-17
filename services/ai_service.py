@@ -948,7 +948,7 @@ def _calculate_ticket_medio(card_data: dict) -> dict:
         if d.get("ticket_medio_item") is not None:
             continue
         # Fallback: calcula em Python se tiver faturamento + pedidos por item
-        f_val = d.get("faturamento")''
+        f_val = d.get("faturamento")
         p_val = d.get("qtd_pedidos")
         d["ticket_medio_item"] = (f_val / p_val) if (f_val and p_val and p_val > 0) else None
 
