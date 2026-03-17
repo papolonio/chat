@@ -8,7 +8,11 @@ from openai import OpenAI
 log = logging.getLogger(__name__)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-MODEL = "gpt-4o-mini"
+# Melhoria #3: modelo maior apenas no Prompt A (roteamento mais crítico)
+MODEL_ROUTER = "gpt-4o"
+MODEL_SQL    = "gpt-4o-mini"
+MODEL_CARD   = "gpt-4o-mini"
+MODEL_FIX    = "gpt-4o-mini"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -34,10 +38,8 @@ def _fmt_int(value: int) -> str:
 #   3. Intent standalone         → consulta de dados (vai para o gerador SQL)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_resolver_prompt() -> str:
-    hoje = datetime.now()
-    return f"""Você é um roteador e resolvedor de intenção para um sistema de análise de dados.
-Hoje é {hoje.strftime('%Y-%m-%d')} ({hoje.strftime('%A')}).
+# Parte estática cacheável (não muda entre requests)
+_RESOLVER_STATIC = """Você é um roteador e resolvedor de intenção para um sistema de análise de dados.
 
 Analise a ÚLTIMA mensagem do usuário no histórico e retorne EXATAMENTE um dos três formatos:
 
@@ -74,13 +76,13 @@ Exemplos:
   → Ticket médio por vendedor de março de 2026
 
   Histórico: nenhum. Atual: "qual o meu faturamento esse mês?" ou "esse mês" ou "este mês"
-  → Faturamento total de {hoje.strftime('%B de %Y')}
+  → Faturamento total de {mes_atual}
 
   Histórico: nenhum. Atual: "relatório deste mês"
-  → Relatório de faturamento de {hoje.strftime('%B de %Y')} agrupado por produto
+  → Relatório de faturamento de {mes_atual} agrupado por produto
 
   Histórico: nenhum. Atual: "qual o faturamento dos últimos 15 dias?"
-  → Faturamento total dos últimos 15 dias (de {hoje.strftime('%Y-%m-%d')} - 15 dias até hoje)
+  → Faturamento total dos últimos 15 dias (de {data_atual} - 15 dias até hoje)
 
   Histórico: nenhum. Atual: "vendas das últimas 2 semanas"
   → Faturamento total das últimas 2 semanas até hoje
@@ -137,18 +139,40 @@ Exemplos:
   → Faturamento por estado em janeiro de 2026"""
 
 
+def _build_resolver_prompt() -> str:
+    """Monta o prompt do roteador injetando apenas a parte dinâmica (data atual)."""
+    hoje = datetime.now()
+    return _RESOLVER_STATIC.format(
+        mes_atual=hoje.strftime("%B de %Y"),
+        data_atual=hoje.strftime("%Y-%m-%d"),
+    ) + f"\n\nHoje é {hoje.strftime('%Y-%m-%d')} ({hoje.strftime('%A')})."
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PROMPT B — Gerador de SQL puro
+# Melhoria #1: regras absolutas e críticas movidas para o TOPO do prompt.
+# Melhoria #7: glossário de negócio separado das regras sintáticas de SQL.
 # Recebe APENAS a intent standalone resolvida. Nunca vê o histórico bruto.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_sql_prompt() -> str:
-    hoje = datetime.now()
-    return f"""Você é um especialista em SQL para PostgreSQL.
+# Parte estática cacheável
+_SQL_STATIC = """Você é um especialista em SQL para PostgreSQL.
 Você receberá uma instrução de consulta clara e auto-suficiente.
 Sua única função é convertê-la em uma query SQL válida.
 
-🔴 STRICT SCHEMA BINDING — CRÍTICO
+════════════════════════════════════════
+🔴 REGRAS ABSOLUTAS — LEIA PRIMEIRO
+════════════════════════════════════════
+1. Retorne APENAS a string SQL pura. Sem markdown, sem ```sql, sem explicações.
+2. NUNCA gere INSERT, UPDATE, DELETE, DROP, CREATE ou qualquer DDL/DML.
+3. Aspas duplas em colunas com maiúsculas. Colunas minúsculas da view não precisam.
+4. Filtros de texto: SEMPRE use ILIKE com % (ex: WHERE "Cliente" ILIKE '%nome%').
+5. SEMPRE que usar GROUP BY, inclua SUM(SUM(valor)) OVER () AS total_geral_faturamento.
+6. SEMPRE que a query for ranking/top/maiores/relatório genérico, inclua LIMIT 20.
+7. Se não for possível responder com as quatro tabelas permitidas → retorne: PERGUNTA_INVALIDA
+
+════════════════════════════════════════
+🔴 STRICT SCHEMA BINDING — TABELAS PERMITIDAS
 ════════════════════════════════════════
 AS ÚNICAS TABELAS PERMITIDAS SÃO:
   • integralmix.agg_vendas_diarias       ← tabela fato agregada (preferencial)
@@ -157,27 +181,6 @@ AS ÚNICAS TABELAS PERMITIDAS SÃO:
   • integralmix."GR_dim_Clientes"        ← dimensão de clientes (para JOINs)
 É ESTRITAMENTE PROIBIDO inventar ou referenciar qualquer outra tabela.
 SEMPRE inclua o prefixo do schema integralmix. na query.
-Se não for possível responder com essas quatro tabelas, retorne: PERGUNTA_INVALIDA
-
-════════════════════════════════════════
-CONTEXTO TEMPORAL
-════════════════════════════════════════
-Hoje é {hoje.strftime('%Y-%m-%d')}. Ano vigente: {hoje.strftime('%Y')}.
-
-▶ DATAS RELATIVAS (palavras como "este mês", "hoje", "ano passado"):
-  - "hoje"        → data_emissao = CURRENT_DATE
-  - "este mês"    → DATE_TRUNC('month', data_emissao) = DATE_TRUNC('month', CURRENT_DATE)
-  - "mês passado" → DATE_TRUNC('month', data_emissao) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
-  - "este ano"        → EXTRACT(YEAR FROM data_emissao) = EXTRACT(YEAR FROM CURRENT_DATE)
-  - "ano passado"     → EXTRACT(YEAR FROM data_emissao) = EXTRACT(YEAR FROM CURRENT_DATE) - 1
-  - "últimos N dias"  → data_emissao >= CURRENT_DATE - INTERVAL 'N days'
-  - "últimas N semanas" → data_emissao >= CURRENT_DATE - INTERVAL 'N weeks'
-  - "últimos N meses" → data_emissao >= CURRENT_DATE - INTERVAL 'N months'
-
-▶ DATAS EXPLÍCITAS (ano ou mês específico já resolvido na instrução):
-  É PROIBIDO usar CURRENT_DATE ou subtração matemática.
-  - "janeiro de 2026" → data_emissao >= '2026-01-01' AND data_emissao < '2026-02-01'
-  - "ano de 2025"     → EXTRACT(YEAR FROM data_emissao) = 2025
 
 ════════════════════════════════════════
 SELEÇÃO DE TABELA — REGRA CRÍTICA
@@ -192,14 +195,31 @@ SELEÇÃO DE TABELA — REGRA CRÍTICA
 ▶ USE integralmix."fVendas" QUANDO:
   - A consulta precisa de COUNT(DISTINCT "Lancamento") — contagem exata de pedidos.
   - A consulta precisa de Ticket Médio (que depende de pedidos exatos).
-  - Coluna de valor:  "Valor"      (com aspas, V maiúsculo)
-  - Coluna de data:   "DataEmissao"(com aspas, D e E maiúsculos)
+  - Coluna de valor:  "Valor"       (com aspas, V maiúsculo)
+  - Coluna de data:   "DataEmissao" (com aspas, D e E maiúsculos)
   - ⚠ Não existe coluna faturamento (sem aspas) nesta tabela.
+
+════════════════════════════════════════
+CONTEXTO TEMPORAL
+════════════════════════════════════════
+▶ DATAS RELATIVAS:
+  - "hoje"            → data_emissao = CURRENT_DATE
+  - "este mês"        → DATE_TRUNC('month', data_emissao) = DATE_TRUNC('month', CURRENT_DATE)
+  - "mês passado"     → DATE_TRUNC('month', data_emissao) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+  - "este ano"        → EXTRACT(YEAR FROM data_emissao) = EXTRACT(YEAR FROM CURRENT_DATE)
+  - "ano passado"     → EXTRACT(YEAR FROM data_emissao) = EXTRACT(YEAR FROM CURRENT_DATE) - 1
+  - "últimos N dias"  → data_emissao >= CURRENT_DATE - INTERVAL 'N days'
+  - "últimas N semanas" → data_emissao >= CURRENT_DATE - INTERVAL 'N weeks'
+  - "últimos N meses" → data_emissao >= CURRENT_DATE - INTERVAL 'N months'
+
+▶ DATAS EXPLÍCITAS (período já resolvido na instrução):
+  É PROIBIDO usar CURRENT_DATE ou subtração matemática.
+  - "janeiro de 2026" → data_emissao >= '2026-01-01' AND data_emissao < '2026-02-01'
+  - "ano de 2025"     → EXTRACT(YEAR FROM data_emissao) = 2025
 
 ════════════════════════════════════════
 FONTES DE DADOS
 ════════════════════════════════════════
-
 ▶ integralmix.agg_vendas_diarias — PREFERENCIAL
   Colunas dimensionais (use com aspas):
     "CodigoEmpresa", "Empresa", "EmpresaGerencial",
@@ -211,107 +231,95 @@ FONTES DE DADOS
   Colunas de data/métrica (sem aspas, minúsculas):
     data_emissao, mes_emissao, faturamento, volume_toneladas
   ⚠ qtd_pedidos nesta tabela NÃO deve ser somada entre grupos — duplica contagens.
-    Para contar pedidos distintos use fVendas com COUNT(DISTINCT "Lancamento").
 
 ▶ integralmix."fVendas" — PARA PEDIDOS E TICKET MÉDIO
-  Use quando precisar de COUNT(DISTINCT "Lancamento") ou detalhes de linha individual.
   Coluna de valor: "Valor" (com aspas, V maiúsculo). Coluna de data: "DataEmissao".
   Métricas: SUM("Valor"), COUNT(DISTINCT "Lancamento"), SUM("Qtd")/1000.0
 
-▶ DIMENSÃO DE PRODUTOS — integralmix."INT_dim_Objetos" (alias: dim)
-  Chave: "CodigoObjeto". Colunas: "Objeto", "DivisaoObjeto", "LinhaObjeto",
-  "DescricaoGerencial", "TipoObjeto", "Ativo", "Nivel02"
+▶ integralmix."INT_dim_Objetos" (alias: dim)
+  Chave: "CodigoObjeto"
   Filtro obrigatório: dim."Nivel02" = 'Produtos p/ venda'
   JOIN: ... JOIN integralmix."INT_dim_Objetos" AS dim ON v."CodigoObjeto" = dim."CodigoObjeto"
 
-▶ DIMENSÃO DE CLIENTES — integralmix."GR_dim_Clientes" (alias: cli)
-  Chave: "CodigoCliente". Colunas: "RazaoSocial", "DivisaoCliente",
-  "Estado", "Municipio", "TipoEstabelecimento", "Grupo_Empresa"
+▶ integralmix."GR_dim_Clientes" (alias: cli)
+  Chave: "CodigoCliente"
   JOIN: ... JOIN integralmix."GR_dim_Clientes" AS cli ON v."CodigoCliente" = cli."CodigoCliente"
 
 ════════════════════════════════════════
-GLOSSÁRIO DE NEGÓCIO — Termos do usuário → coluna/tabela
+INTERPRETAÇÃO DE TERMOS DO USUÁRIO
 ════════════════════════════════════════
-Use este glossário para interpretar o que o usuário quer dizer:
+▶ Aliases de dimensão (palavra do usuário → coluna real):
+  "região" / "regiões" / "regional" → "Estado"
+  "produto" / "produtos" / "item"   → "Objeto"
+  "vendedor" / "representante"      → "Vendedor"
+  "cliente" / "clientes"            → "Cliente"
+  "cidade" / "município"            → "Cidade"
 
-▶ DIMENSÕES DE PRODUTO (requer JOIN com INT_dim_Objetos):
-  "linha do produto" / "linha"       → dim."LinhaObjeto"
-  "divisão do produto" / "divisão"   → dim."DivisaoObjeto"
-  "descrição gerencial"              → dim."DescricaoGerencial"
-  "tipo de produto"                  → dim."TipoObjeto"
-  "produto ativo" / "apenas ativos"  → dim."Ativo" = true
+▶ Dimensões em agg_vendas_diarias (sem JOIN):
+  "canal" / "canal de venda"        → "CanalCliente"
+  "segmento"                        → "Segmento"
+  "área de venda"                   → "AreaVenda"
+  "área mãe" / "área gerencial"     → "AreaVendaMae"
+  "forma de pagamento"              → "FormadePagamento"
+  "tipo de documento"               → "TipodeDocumento"
+  "empresa" / "filial"              → "Empresa"
+  "empresa gerencial"               → "EmpresaGerencial"
+  "gerente"                         → "Gerente"
+  "supervisor"                      → "Supervisor"
+  "volume" / "toneladas"            → volume_toneladas
+  "produto pai" / "família"         → "ObjetoMae"
 
-▶ DIMENSÕES DE CLIENTE (requer JOIN com GR_dim_Clientes):
-  "razão social" / "nome do cliente" → cli."RazaoSocial"
-  "divisão do cliente"               → cli."DivisaoCliente"
-  "tipo de estabelecimento" / "tipo de cliente" → cli."TipoEstabelecimento"
-  "grupo empresarial" / "grupo"      → cli."Grupo_Empresa"
-  "município do cliente"             → cli."Municipio"
+▶ Dimensões via JOIN com INT_dim_Objetos:
+  "linha do produto"                → dim."LinhaObjeto"
+  "divisão do produto"              → dim."DivisaoObjeto"
+  "descrição gerencial"             → dim."DescricaoGerencial"
+  "tipo de produto"                 → dim."TipoObjeto"
+  "produto ativo"                   → dim."Ativo" = true
 
-▶ DIMENSÕES DISPONÍVEIS EM agg_vendas_diarias (sem JOIN):
-  "canal" / "canal de venda" / "canal de atendimento" → "CanalCliente"
-    (valores típicos: Distribuidor, Cooperativa, Varejo, Indústria, Produtor Rural)
-  "segmento" / "segmento do cliente"                  → "Segmento"
-  "área de venda" / "área"                            → "AreaVenda"
-  "área mãe" / "área gerencial"                       → "AreaVendaMae"
-  "forma de pagamento" / "pagamento"                  → "FormadePagamento"
-  "tipo de documento" / "tipo de nota"                → "TipodeDocumento"
-  "empresa" / "filial"                                → "Empresa"
-  "empresa gerencial" / "grupo empresa"               → "EmpresaGerencial"
-  "gerente" / "gerente de vendas"                     → "Gerente"
-  "supervisor" / "supervisor de vendas"               → "Supervisor"
-  "volume" / "toneladas" / "peso"                     → volume_toneladas  (em toneladas)
-  "produto pai" / "família de produto"                → "ObjetoMae"
+▶ Dimensões via JOIN com GR_dim_Clientes:
+  "razão social"                    → cli."RazaoSocial"
+  "divisão do cliente"              → cli."DivisaoCliente"
+  "tipo de estabelecimento"         → cli."TipoEstabelecimento"
+  "grupo empresarial"               → cli."Grupo_Empresa"
+  "município do cliente"            → cli."Municipio"
 
-▶ MÉTRICAS:
-  "faturamento" / "receita" / "vendas" / "quanto vendeu" → SUM(faturamento) ou SUM("Valor")
-  "ticket médio" / "valor médio por pedido"              → SUM("Valor") / COUNT(DISTINCT "Lancamento")
-  "volume de pedidos" / "quantidade de pedidos" / "pedidos" → COUNT(DISTINCT "Lancamento") via fVendas
-  "clientes atendidos" / "base de clientes"              → COUNT(DISTINCT "CodigoCliente")
-  "mix de produtos" / "produtos distintos"               → COUNT(DISTINCT "CodigoObjeto")
+▶ Métricas:
+  "faturamento" / "receita" / "vendas"         → SUM(faturamento) ou SUM("Valor")
+  "ticket médio"                               → SUM("Valor") / COUNT(DISTINCT "Lancamento")
+  "volume de pedidos" / "pedidos"              → COUNT(DISTINCT "Lancamento") via fVendas
+  "clientes atendidos"                         → COUNT(DISTINCT "CodigoCliente")
+  "mix de produtos"                            → COUNT(DISTINCT "CodigoObjeto")
+
+▶ Intenções que NUNCA devem retornar PERGUNTA_INVALIDA:
+  "produtos vendidos" / "top produtos"   → GROUP BY "Objeto"
+  "melhores clientes" / "top clientes"   → GROUP BY "Cliente"
+  "vendedores" / "top vendedores"        → GROUP BY "Vendedor"
+  "por região" / "por estado"            → GROUP BY "Estado"
+  "por cidade"                           → GROUP BY "Cidade"
 
 ════════════════════════════════════════
-REGRAS DE SAÍDA
+REGRAS SQL — CONSTRUÇÃO DA QUERY
 ════════════════════════════════════════
-1. Retorne APENAS a string SQL pura. Sem markdown, sem ```sql, sem explicações.
-2. Aspas duplas em colunas com maiúsculas. Colunas minúsculas da view não precisam.
-3. NUNCA gere INSERT, UPDATE, DELETE, DROP, CREATE ou qualquer DDL/DML.
-4. Filtros de texto: SEMPRE use ILIKE com % (ex: WHERE "Cliente" ILIKE '%nome%').
-   ALIAS DE DIMENSÕES (palavras do usuário → coluna real):
-   "região" / "regiões" / "regional" → coluna "Estado"
-   "produto" / "produtos" / "item" / "itens" → coluna "Objeto"
-   "vendedor" / "representante" → coluna "Vendedor"
-   "cliente" / "clientes" / "comprador" → coluna "Cliente"
-   "cidade" / "município" → coluna "Cidade"
-5. MAPEAMENTO DE INTENÇÕES — estas perguntas NUNCA devem retornar PERGUNTA_INVALIDA:
-   - "produtos vendidos", "quais produtos", "top produtos" → GROUP BY "Objeto"
-   - "melhores clientes", "top clientes", "quais clientes" → GROUP BY "Cliente"
-   - "vendedores", "top vendedores"                       → GROUP BY "Vendedor"
-   - "por região", "por estado", "regiões"                → GROUP BY "Estado"
-   - "por cidade", "cidades"                              → GROUP BY "Cidade"
-   Só retorne PERGUNTA_INVALIDA se a pergunta exigir tabelas ou dados que não existem.
-6. 🔴 REPORT MODE: Para perguntas amplas sem filtro de entidade específica, NUNCA retorne
-   apenas um SUM() isolado. Use GROUP BY pela dimensão mais relevante ("Objeto", "Estado"
-   ou "Vendedor") + sempre inclua SUM("Valor") AS faturamento_total + COUNT(DISTINCT "Lancamento")
-   AS qtd_pedidos, ORDER BY faturamento_total DESC LIMIT 20.
+▶ TOTAL REAL COM WINDOW FUNCTION (CRÍTICO):
+  SEMPRE que usar GROUP BY, inclua:
+    SUM(SUM(faturamento)) OVER () AS total_geral_faturamento   ← para agg_vendas_diarias
+    SUM(SUM("Valor"))     OVER () AS total_geral_faturamento   ← para fVendas
+  Essa coluna tem o mesmo valor em todas as linhas e representa o total REAL antes do LIMIT.
+  ⚠ NÃO use COUNT(DISTINCT col) OVER () — é inválido no PostgreSQL.
 
-7. 🔴 LIMIT OBRIGATÓRIO: Sempre que a pergunta envolver "Top", "Ranking", "Maiores",
-   "Melhores", ou for um relatório/overview genérico, inclua LIMIT 20 no final da query.
+▶ REPORT MODE:
+  Para perguntas amplas sem filtro de entidade específica, NUNCA retorne apenas um SUM() isolado.
+  Use GROUP BY pela dimensão mais relevante + SUM + COUNT(DISTINCT "Lancamento") + ORDER BY + LIMIT 20.
 
-8. 🔴 TOTAL REAL COM WINDOW FUNCTION (CRÍTICO PARA CONSISTÊNCIA):
-   SEMPRE que usar GROUP BY, inclua obrigatoriamente as colunas de total global via
-   window function. Isso garante que o total correto seja preservado mesmo com LIMIT.
-   Modelo obrigatório para queries com GROUP BY:
-     SUM(SUM("Valor")) OVER () AS total_geral_faturamento
-   Essa coluna terá o mesmo valor em todas as linhas e representa o faturamento REAL
-   de todo o período/filtro, antes do LIMIT ser aplicado pelo banco.
-   ⚠ NÃO use COUNT(DISTINCT col) OVER () — é inválido no PostgreSQL.
+▶ LIMIT OBRIGATÓRIO:
+  Sempre que a pergunta envolver "Top", "Ranking", "Maiores", "Melhores" ou for um relatório
+  genérico, inclua LIMIT 20 no final.
 
 ════════════════════════════════════════
 EXEMPLOS
 ════════════════════════════════════════
 
--- Instrução: "Produtos vendidos em janeiro de 2026" ou "top produtos de janeiro de 2026"
+-- Top produtos de janeiro de 2026
 SELECT "Objeto",
        SUM(faturamento)                          AS faturamento_total,
        SUM(SUM(faturamento)) OVER ()             AS total_geral_faturamento
@@ -323,14 +331,14 @@ LIMIT 20;
 
 ---
 
--- Instrução: "Faturamento total de março de 2026" (sem pedidos — usa agg_vendas_diarias)
-SELECT SUM(faturamento)                          AS faturamento_total
+-- Faturamento total de março de 2026
+SELECT SUM(faturamento) AS faturamento_total
 FROM integralmix.agg_vendas_diarias
 WHERE data_emissao >= '2026-03-01' AND data_emissao < '2026-04-01';
 
 ---
 
--- Instrução: "Faturamento por estado dos últimos 15 dias" (sem pedidos — usa agg_vendas_diarias)
+-- Faturamento por estado dos últimos 15 dias
 SELECT "Estado",
        SUM(faturamento)                          AS faturamento_total,
        SUM(SUM(faturamento)) OVER ()             AS total_geral_faturamento
@@ -342,67 +350,12 @@ LIMIT 20;
 
 ---
 
--- Instrução: "Relatório de faturamento de março de 2026 agrupado por produto" (sem pedidos — usa agg_vendas_diarias)
-SELECT "Objeto",
-       SUM(faturamento)                          AS faturamento_total,
-       SUM(SUM(faturamento)) OVER ()             AS total_geral_faturamento
-FROM integralmix.agg_vendas_diarias
-WHERE data_emissao >= '2026-03-01' AND data_emissao < '2026-04-01'
-GROUP BY "Objeto"
-ORDER BY faturamento_total DESC
-LIMIT 20;
-
----
-
--- Instrução: "Faturamento total de fevereiro de 2026 com contagem de pedidos" (usa fVendas)
-SELECT SUM("Valor")                              AS faturamento_total,
-       COUNT(DISTINCT "Lancamento")              AS qtd_pedidos
-FROM integralmix."fVendas"
-WHERE "DataEmissao" >= '2026-02-01' AND "DataEmissao" < '2026-03-01';
-
----
-
--- Instrução: "Relatório de faturamento de março de 2026 agrupado por produto"
-SELECT "Objeto",
-       SUM("Valor")                              AS faturamento_total,
-       COUNT(DISTINCT "Lancamento")              AS qtd_pedidos,
-       SUM(SUM("Valor")) OVER ()                  AS total_geral_faturamento
-FROM integralmix."fVendas"
-WHERE "DataEmissao" >= '2026-03-01' AND "DataEmissao" < '2026-04-01'
-GROUP BY "Objeto"
-ORDER BY faturamento_total DESC
-LIMIT 20;
-
----
-
--- Instrução: "Faturamento por estado dos últimos 15 dias"
-SELECT "Estado",
-       SUM("Valor")                              AS faturamento_total,
-       COUNT(DISTINCT "Lancamento")              AS qtd_pedidos,
-       SUM(SUM("Valor")) OVER ()                  AS total_geral_faturamento
-FROM integralmix."fVendas"
-WHERE "DataEmissao" >= CURRENT_DATE - INTERVAL '15 days'
-GROUP BY "Estado"
-ORDER BY faturamento_total DESC
-LIMIT 20;
-
----
-
--- Instrução: "Faturamento do cliente Farelo Verde no ano de 2025"
-SELECT SUM("Valor")                AS faturamento_total,
-       COUNT(DISTINCT "Lancamento") AS qtd_pedidos
-FROM integralmix."fVendas"
-WHERE "Cliente" ILIKE '%farelo verde%'
-  AND EXTRACT(YEAR FROM "DataEmissao") = 2025;
-
----
-
--- Instrução: "Ticket médio por vendedor deste mês"
+-- Ticket médio por vendedor deste mês
 SELECT "Vendedor",
-       SUM("Valor") / NULLIF(COUNT(DISTINCT "Lancamento"), 0)  AS ticket_medio,
-       SUM("Valor")                                             AS faturamento_total,
-       COUNT(DISTINCT "Lancamento")                             AS qtd_pedidos,
-       SUM(SUM("Valor")) OVER ()                               AS total_geral_faturamento
+       SUM("Valor") / NULLIF(COUNT(DISTINCT "Lancamento"), 0) AS ticket_medio,
+       SUM("Valor")                                            AS faturamento_total,
+       COUNT(DISTINCT "Lancamento")                            AS qtd_pedidos,
+       SUM(SUM("Valor")) OVER ()                              AS total_geral_faturamento
 FROM integralmix."fVendas"
 WHERE DATE_TRUNC('month', "DataEmissao") = DATE_TRUNC('month', CURRENT_DATE)
 GROUP BY "Vendedor"
@@ -411,11 +364,11 @@ LIMIT 20;
 
 ---
 
--- Instrução: "Top clientes por faturamento em janeiro de 2026"
+-- Top clientes por faturamento em janeiro de 2026
 SELECT "Cliente",
-       SUM("Valor")                AS faturamento_total,
+       SUM("Valor")                 AS faturamento_total,
        COUNT(DISTINCT "Lancamento") AS qtd_pedidos,
-       SUM(SUM("Valor")) OVER ()   AS total_geral_faturamento
+       SUM(SUM("Valor")) OVER ()    AS total_geral_faturamento
 FROM integralmix."fVendas"
 WHERE "DataEmissao" >= '2026-01-01' AND "DataEmissao" < '2026-02-01'
 GROUP BY "Cliente"
@@ -424,11 +377,11 @@ LIMIT 20;
 
 ---
 
--- Instrução: "Melhor cliente em Fortaleza em janeiro de 2026"
+-- Melhor cliente em Fortaleza em janeiro de 2026
 SELECT "Cliente",
-       SUM("Valor")                AS faturamento_total,
+       SUM("Valor")                 AS faturamento_total,
        COUNT(DISTINCT "Lancamento") AS qtd_pedidos,
-       SUM(SUM("Valor")) OVER ()   AS total_geral_faturamento
+       SUM(SUM("Valor")) OVER ()    AS total_geral_faturamento
 FROM integralmix."fVendas"
 WHERE "Cidade" ILIKE '%fortaleza%'
   AND "DataEmissao" >= '2026-01-01' AND "DataEmissao" < '2026-02-01'
@@ -438,8 +391,7 @@ LIMIT 20;
 
 ---
 
--- Instrução: "Comparação de faturamento entre o mês atual e o mês anterior"
--- Instrução: "e em comparação ao mês anterior?" / "evolução mês a mês" / "variação vs mês passado"
+-- Comparação de faturamento mês atual vs mês anterior
 SELECT TO_CHAR(DATE_TRUNC('month', data_emissao), 'MM/YYYY') AS periodo,
        SUM(faturamento)                                        AS faturamento_total
 FROM integralmix.agg_vendas_diarias
@@ -450,17 +402,7 @@ ORDER BY DATE_TRUNC('month', data_emissao) ASC;
 
 ---
 
--- Instrução: "Comparação de faturamento de janeiro de 2026 com dezembro de 2025"
-SELECT TO_CHAR(DATE_TRUNC('month', data_emissao), 'MM/YYYY') AS periodo,
-       SUM(faturamento)                                        AS faturamento_total
-FROM integralmix.agg_vendas_diarias
-WHERE data_emissao >= '2025-12-01' AND data_emissao < '2026-02-01'
-GROUP BY DATE_TRUNC('month', data_emissao)
-ORDER BY DATE_TRUNC('month', data_emissao) ASC;
-
----
-
--- Instrução: "Evolução mensal do faturamento no ano de 2026" / "mês a mês de 2026" / "histórico 2026"
+-- Evolução mensal do faturamento no ano de 2026
 SELECT TO_CHAR(DATE_TRUNC('month', data_emissao), 'MM/YYYY') AS periodo,
        SUM(faturamento)                                        AS faturamento_total
 FROM integralmix.agg_vendas_diarias
@@ -470,20 +412,29 @@ ORDER BY DATE_TRUNC('month', data_emissao) ASC;
 
 ---
 
--- Instrução: "Evolução mensal dos últimos 6 meses" / "série dos últimos 6 meses"
+-- Evolução mensal dos últimos 6 meses
 SELECT TO_CHAR(DATE_TRUNC('month', data_emissao), 'MM/YYYY') AS periodo,
        SUM(faturamento)                                        AS faturamento_total
 FROM integralmix.agg_vendas_diarias
 WHERE data_emissao >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months'
   AND data_emissao <  DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'
 GROUP BY DATE_TRUNC('month', data_emissao)
-ORDER BY DATE_TRUNC('month', data_emissao) ASC;
-"""
+ORDER BY DATE_TRUNC('month', data_emissao) ASC;"""
+
+
+def _build_sql_prompt() -> str:
+    """Monta o prompt SQL injetando apenas a data atual (parte dinâmica)."""
+    hoje = datetime.now()
+    return (
+        _SQL_STATIC
+        + f"\n\nHoje é {hoje.strftime('%Y-%m-%d')}. Ano vigente: {hoje.strftime('%Y')}."
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PROMPT C — Extrator de Card Data (JSON estruturado)
 # Responsabilidade: extrair números reais dos resultados. Nunca inventar.
+# ticket_medio removido daqui — calculado em Python após extração (melhoria #4).
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT_CARD_EXTRACTOR = """Você é um extrator de dados estruturados.
@@ -493,7 +444,6 @@ Extraia os dados e retorne APENAS um JSON válido neste schema exato:
 {
   "faturamento_total": <float ou null>,
   "qtd_pedidos": <int ou null>,
-  "ticket_medio": <float ou null>,
   "top_drivers": [
     {"nome": "<string>", "faturamento": <float>, "qtd_pedidos": <int ou null>}
   ],
@@ -514,21 +464,19 @@ REGRAS CRÍTICAS — TOLERÂNCIA ZERO PARA ALUCINAÇÃO:
     PRIORIDADE 1: Se existir "total_geral_pedidos", use esse valor.
     PRIORIDADE 2: Some os valores de pedidos das linhas, ou null se não existir.
 
-- ticket_medio: calcule faturamento_total / qtd_pedidos APENAS se ambos existirem; caso contrário null.
-
 - serie_temporal: preencha quando os dados contêm uma coluna "periodo" com valores de mês/ano
   (ex: "01/2026", "02/2026") E há 2 ou mais linhas — cada uma é um período de tempo.
   → Ordene do mais antigo ao mais recente (ordem cronológica crescente).
   → "periodo" deve ser o valor da coluna "periodo" tal como está nos dados.
   → Neste caso: top_drivers = [] e faturamento_total = valor do período mais recente.
-  → Se os dados NÃO têm coluna "periodo", use null.
 
 - top_drivers: se os dados têm agrupamento por ENTIDADE (produto, vendedor, estado, cidade,
   cliente — NÃO períodos de tempo), inclua os 3 primeiros itens por maior faturamento.
   "nome" = VALOR real da célula (ex: "Fortaleza", "João Silva"), NUNCA o nome da coluna.
   Se não há agrupamento por entidade ou é série temporal, use [].
 
-- Retorne APENAS o JSON, sem markdown, sem explicações."""
+- Retorne APENAS o JSON, sem markdown, sem explicações.
+- NÃO inclua o campo ticket_medio — ele é calculado externamente."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -580,7 +528,6 @@ def render_card(card_data: dict) -> str:
                     var_str = "—"
             lines.append(f"| {s['periodo']} | {_fmt_brl(v)} | {var_str} |")
 
-        # Tendência geral (primeiro → último)
         if serie[0].get("faturamento", 0) > 0:
             v0, vn = serie[0]["faturamento"], serie[-1]["faturamento"]
             trend  = ((vn - v0) / v0) * 100
@@ -613,11 +560,15 @@ def render_card(card_data: dict) -> str:
         lines.append(f"- 🎟️ Ticket Médio: {_fmt_brl(tkt)}")
 
     if drivers:
-        # Fallback: detecta se drivers são períodos (comparação sem serie_temporal)
         fat_values = [d.get("faturamento") for d in drivers]
         if (len(drivers) == 2
                 and all(v is not None for v in fat_values)
                 and all(_is_period_str(d.get("nome", "")) for d in drivers)):
+            # Fallback: drivers foram populados com períodos (comparação sem serie_temporal)
+            log.warning(
+                "render_card: fallback de comparação via top_drivers ativado. "
+                "Verifique se o Prompt C está populando serie_temporal corretamente."
+            )
             v_ant, v_atual = fat_values[0], fat_values[1]
             lines.append("\n### 📊 Comparativo de Períodos")
             lines.append(f"- 🔵 {drivers[0]['nome']}: {_fmt_brl(v_ant)}")
@@ -646,64 +597,114 @@ def render_card(card_data: dict) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# HELPERS INTERNOS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _rows_limit_for_intent(standalone_intent: str) -> int:
+    """Melhoria #5: envia menos rows ao Prompt C quando a query é um total simples.
+    Queries de ranking/série se beneficiam de mais linhas; totais simples não precisam."""
+    intent_lower = standalone_intent.lower()
+    ranking_signals = ("top", "ranking", "maiores", "melhores", "por produto", "por cliente",
+                       "por vendedor", "por estado", "por cidade", "por região", "evolução",
+                       "mês a mês", "série", "comparação")
+    if any(signal in intent_lower for signal in ranking_signals):
+        return 20
+    return 5
+
+
+def _calculate_ticket_medio(card_data: dict) -> dict:
+    """Melhoria #4: calcula ticket_medio em Python, sem depender do LLM."""
+    fat = card_data.get("faturamento_total")
+    ped = card_data.get("qtd_pedidos")
+    if fat is not None and ped is not None and ped > 0:
+        card_data["ticket_medio"] = fat / ped
+    else:
+        card_data["ticket_medio"] = None
+    return card_data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # API PÚBLICA
 # ─────────────────────────────────────────────────────────────────────────────
 
 def resolve_intent(history: list[dict]) -> str:
     """Passo 1: Roteia e resolve o intent do usuário a partir do histórico.
-    Retorna RESPOSTA_DIRETA:, CLARIFICACAO: ou uma frase standalone limpa."""
-    response = client.chat.completions.create(
-        model=MODEL,
+    Retorna RESPOSTA_DIRETA:, CLARIFICACAO: ou uma frase standalone limpa.
+    Usa MODEL_ROUTER (gpt-4o) para maior precisão no roteamento."""
+    resolved = client.chat.completions.create(
+        model=MODEL_ROUTER,
         messages=[
             {"role": "system", "content": _build_resolver_prompt()},
             *history,
         ],
         temperature=0,
+    ).choices[0].message.content.strip()
+
+    # Melhoria #8: log estruturado da intent resolvida para diagnóstico em produção
+    last_user_msg = next(
+        (m["content"] for m in reversed(history) if m.get("role") == "user"), ""
     )
-    return response.choices[0].message.content.strip()
+    log.info(
+        "intent_resolved",
+        extra={"intent": resolved, "user_msg": last_user_msg},
+    )
+    return resolved
 
 
 def generate_sql(standalone_intent: str) -> str:
     """Passo 2: Gera SQL a partir de uma instrução standalone já resolvida.
     Não recebe histórico — sem contaminação de contexto."""
-    response = client.chat.completions.create(
-        model=MODEL,
+    return client.chat.completions.create(
+        model=MODEL_SQL,
         messages=[
             {"role": "system", "content": _build_sql_prompt()},
             {"role": "user", "content": standalone_intent},
         ],
         temperature=0,
-    )
-    return response.choices[0].message.content.strip()
+    ).choices[0].message.content.strip()
 
 
 def fix_sql(broken_sql: str, db_error: str) -> str:
-    """Self-healing: envia SQL com erro + mensagem do banco para correção (1 retry)."""
-    log.warning("Tentando auto-correção de SQL via IA...")
-    response = client.chat.completions.create(
-        model=MODEL,
+    """Melhoria #2: self-healing com retry. Levanta RuntimeError explícito se falhar,
+    permitindo que o caller exiba mensagem amigável ao usuário."""
+    log.warning(
+        "fix_sql: tentando auto-correção. Erro original: %s",
+        db_error,
+    )
+    fixed = client.chat.completions.create(
+        model=MODEL_FIX,
         messages=[
             {"role": "system", "content": _SYSTEM_PROMPT_FIX},
             {"role": "user", "content": f"SQL com erro:\n{broken_sql}\n\nErro:\n{db_error}"},
         ],
         temperature=0,
-    )
-    return response.choices[0].message.content.strip()
+    ).choices[0].message.content.strip()
 
-
-_MAX_ROWS_TO_LLM = 20  # trava de payload: o LLM nunca vê mais que isso
+    if not fixed or fixed.upper().startswith("PERGUNTA_INVALIDA"):
+        raise RuntimeError(
+            "Não foi possível corrigir a query automaticamente. "
+            "Por favor, reformule a pergunta ou entre em contato com o suporte."
+        )
+    return fixed
 
 
 def extract_card_data(standalone_intent: str, rows: list) -> dict:
     """Passo 3a: LLM extrai JSON estruturado dos resultados brutos.
-    Trunca o payload antes de enviar para evitar estouro de tokens (429).
+    Melhorias aplicadas:
+      - #5: limite de rows adaptado ao tipo de query (ranking vs. total simples)
+      - #4: ticket_medio calculado em Python após extração, não pelo LLM
     Usa json_object mode — garante JSON válido na saída."""
-    safe_rows = rows[:_MAX_ROWS_TO_LLM]
-    if len(rows) > _MAX_ROWS_TO_LLM:
-        log.info("Payload truncado: %d → %d linhas antes de enviar ao LLM.", len(rows), _MAX_ROWS_TO_LLM)
+    max_rows = _rows_limit_for_intent(standalone_intent)
+    safe_rows = rows[:max_rows]
+
+    if len(rows) > max_rows:
+        log.info(
+            "extract_card_data: payload truncado %d → %d linhas (intent: %s).",
+            len(rows), max_rows, standalone_intent,
+        )
 
     response = client.chat.completions.create(
-        model=MODEL,
+        model=MODEL_CARD,
         messages=[
             {"role": "system", "content": _SYSTEM_PROMPT_CARD_EXTRACTOR},
             {"role": "user", "content": f"Intenção: {standalone_intent}\n\nDados: {safe_rows}"},
@@ -713,7 +714,10 @@ def extract_card_data(standalone_intent: str, rows: list) -> dict:
     )
     raw = response.choices[0].message.content.strip()
     try:
-        return json.loads(raw)
+        card_data = json.loads(raw)
     except json.JSONDecodeError:
-        log.error("Falha ao parsear JSON do extrator: %s", raw)
+        log.error("extract_card_data: falha ao parsear JSON do extrator: %s", raw)
         return {}
+
+    # Melhoria #4: ticket_medio calculado aqui, nunca pelo LLM
+    return _calculate_ticket_medio(card_data)
