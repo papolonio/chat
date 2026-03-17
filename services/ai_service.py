@@ -47,8 +47,9 @@ Analise a ÚLTIMA mensagem do usuário no histórico e retorne EXATAMENTE um dos
 
 ━━━ CASO B — Pergunta ambígua ou incompleta ━━━
 Apenas quando falta informação que o usuário PRECISA fornecer (ex: "faturamento do mês de 2024" — qual mês?).
-NÃO use este caso para expressões relativas com número explícito como:
-"últimos 7 dias", "últimas 2 semanas", "últimos 3 meses" — essas são resolvíveis com CURRENT_DATE.
+NÃO use este caso para expressões relativas como:
+"este mês", "esse mês", "esse ano", "hoje", "mês passado", "últimos 7 dias",
+"últimas 2 semanas", "últimos 3 meses" — todas são resolvíveis com CURRENT_DATE.
 → Retorne: CLARIFICACAO: <pergunta pedindo o dado faltante>
 
 ━━━ CASO C — Consulta de dados (requer SQL) ━━━
@@ -66,6 +67,9 @@ Exemplos:
 
   Histórico: relatório de vendedores em março/2026. Atual: "e o ticket médio desse período?"
   → Ticket médio por vendedor de março de 2026
+
+  Histórico: nenhum. Atual: "qual o meu faturamento esse mês?" ou "esse mês" ou "este mês"
+  → Faturamento total de {hoje.strftime('%B de %Y')}
 
   Histórico: nenhum. Atual: "relatório deste mês"
   → Relatório de faturamento de {hoje.strftime('%B de %Y')} agrupado por produto
@@ -183,10 +187,10 @@ REGRAS DE SAÍDA
    SEMPRE que usar GROUP BY, inclua obrigatoriamente as colunas de total global via
    window function. Isso garante que o total correto seja preservado mesmo com LIMIT.
    Modelo obrigatório para queries com GROUP BY:
-     SUM(SUM(faturamento)) OVER () AS total_geral_faturamento,
-     SUM(SUM(qtd_pedidos))  OVER () AS total_geral_pedidos
-   Essas colunas terão o mesmo valor em todas as linhas e representam o total REAL
+     SUM(SUM("Valor")) OVER () AS total_geral_faturamento
+   Essa coluna terá o mesmo valor em todas as linhas e representa o faturamento REAL
    de todo o período/filtro, antes do LIMIT ser aplicado pelo banco.
+   ⚠ NÃO use COUNT(DISTINCT col) OVER () — é inválido no PostgreSQL.
 
 ════════════════════════════════════════
 EXEMPLOS
@@ -204,8 +208,7 @@ WHERE "DataEmissao" >= '2026-02-01' AND "DataEmissao" < '2026-03-01';
 SELECT "Objeto",
        SUM("Valor")                              AS faturamento_total,
        COUNT(DISTINCT "Lancamento")              AS qtd_pedidos,
-       SUM(SUM("Valor"))       OVER ()           AS total_geral_faturamento,
-       COUNT(DISTINCT "Lancamento") OVER ()      AS total_geral_pedidos
+       SUM(SUM("Valor")) OVER ()                  AS total_geral_faturamento
 FROM integralmix."fVendas"
 WHERE "DataEmissao" >= '2026-03-01' AND "DataEmissao" < '2026-04-01'
 GROUP BY "Objeto"
@@ -218,8 +221,7 @@ LIMIT 20;
 SELECT "Estado",
        SUM("Valor")                              AS faturamento_total,
        COUNT(DISTINCT "Lancamento")              AS qtd_pedidos,
-       SUM(SUM("Valor"))       OVER ()           AS total_geral_faturamento,
-       COUNT(DISTINCT "Lancamento") OVER ()      AS total_geral_pedidos
+       SUM(SUM("Valor")) OVER ()                  AS total_geral_faturamento
 FROM integralmix."fVendas"
 WHERE "DataEmissao" >= CURRENT_DATE - INTERVAL '15 days'
 GROUP BY "Estado"
