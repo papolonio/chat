@@ -128,8 +128,66 @@ Exemplos:
   Histórico: relatório de VENDEDORES de fevereiro/2026. Atual: "quero ver por ticket médio"
   → Ticket médio por vendedor em fevereiro de 2026
 
+  Histórico: relatório de VENDEDORES de fevereiro/2026 (qualquer métrica). Atual: "qual o vendedor com maior ticket médio nesse mesmo período?" ou "e qual tem maior ticket médio?" ou "quero ver ticket médio"
+  → Ticket médio por vendedor em fevereiro de 2026
+  ATENÇÃO: a palavra "ticket médio" na pergunta atual SEMPRE prevalece sobre a métrica do histórico.
+
+  Histórico: relatório de CLIENTES (qualquer métrica). Atual: "e qual cliente tem maior ticket médio?" ou "qual cliente com maior ticket médio?"
+  → Ticket médio por cliente neste mês
+
+  Histórico: relatório de PRODUTOS de janeiro/2026 (qualquer métrica). Atual: "qual produto tem maior ticket médio?" ou "e o ticket médio por produto?"
+  → Ticket médio por produto em janeiro de 2026
+
   Histórico: relatório de ESTADOS (regiões) de março/2026. Atual: "e por ticket médio?"
   → Ticket médio por estado em março de 2026
+
+  Histórico: evolução mensal de faturamento de 12/2025 a 03/2026. Atual: "e o ticket médio?" ou "quero ver por ticket médio"
+  → Evolução mensal do ticket médio de dezembro de 2025 a março de 2026
+
+  Histórico: nenhum. Atual: "preciso entender a variação do meu ticket médio do ano passado" ou "ticket médio de todo o ano passado"
+  → Evolução mensal do ticket médio no ano de 2025
+
+  Histórico: nenhum. Atual: "ticket médio desse ano" ou "variação do ticket médio em 2026"
+  → Evolução mensal do ticket médio no ano de 2026
+
+  Histórico: nenhum. Atual: "como foi o ticket médio mês a mês em 2025?"
+  → Evolução mensal do ticket médio no ano de 2025
+
+  Histórico: nenhum. Atual: "qual foi a evolução do ticket médio nos últimos 6 meses?"
+  → Evolução mensal do ticket médio dos últimos 6 meses
+
+  ── Série temporal NÃO pode ter dimensão ──
+  Séries temporais (evolução mês a mês) mostram UMA métrica ao longo do tempo.
+  NUNCA combine série temporal com dimensão (por estado, por produto, por cliente, por vendedor).
+  Se o usuário pedir "evolução por estado", "ticket médio por estado mês a mês",
+  "faturamento por produto mês a mês" ou qualquer combinação série + dimensão:
+  → Retorne: CLARIFICACAO: Posso mostrar a evolução mensal geral ou o ranking por [dimensão] em um período específico. Qual prefere?
+
+  Exemplos que DEVEM gerar CLARIFICACAO:
+    "evolução do ticket médio por estado em 2025"          → CLARIFICACAO
+    "evolução do faturamento por produto mês a mês"        → CLARIFICACAO
+    "como foi o faturamento de cada vendedor mês a mês"    → CLARIFICACAO
+    "crescimento por cliente ao longo do ano"              → CLARIFICACAO
+
+  ── Troca de métrica em série temporal ──
+  Regra: quando o histórico mostra uma SÉRIE TEMPORAL e o usuário pede outra métrica,
+  preserva EXATAMENTE o período e a granularidade (mensal, anual, últimos N meses) do histórico.
+  Apenas a métrica muda (faturamento ↔ ticket médio ↔ pedidos).
+
+  Histórico: evolução mensal do ticket médio no ano de 2025. Atual: "agora por faturamento" ou "quero ver por faturamento"
+  → Evolução mensal do faturamento no ano de 2025
+
+  Histórico: evolução mensal do ticket médio de 2025. Atual: "agora preciso entender a variação mês a mês por faturamento, do ano anterior"
+  → Evolução mensal do faturamento no ano de 2025
+
+  Histórico: evolução mensal do faturamento no ano de 2026. Atual: "e o ticket médio?" ou "agora por ticket médio"
+  → Evolução mensal do ticket médio no ano de 2026
+
+  Histórico: evolução mensal do faturamento dos últimos 6 meses. Atual: "e por ticket médio?"
+  → Evolução mensal do ticket médio dos últimos 6 meses
+
+  Histórico: evolução mensal do ticket médio dos últimos 6 meses. Atual: "e por faturamento?"
+  → Evolução mensal do faturamento dos últimos 6 meses
 
   Histórico: relatório de CLIENTES de janeiro/2026. Atual: "e por região?" ou "e por estado?"
   → Faturamento por estado em janeiro de 2026
@@ -177,13 +235,22 @@ Exemplos:
   → RELATORIO_COMPLETO: janeiro de 2026"""
 
 
+_MESES_PT = {
+    1: "janeiro", 2: "fevereiro", 3: "março",    4: "abril",
+    5: "maio",    6: "junho",     7: "julho",     8: "agosto",
+    9: "setembro",10: "outubro",  11: "novembro", 12: "dezembro",
+}
+
+
 def _build_resolver_prompt() -> str:
-    """Monta o prompt do roteador injetando apenas a parte dinâmica (data atual)."""
+    """Monta o prompt do roteador injetando apenas a parte dinâmica (data atual).
+    Usa mapa de meses fixo em vez de strftime('%B') para não depender do locale do SO."""
     hoje = datetime.now()
+    mes_pt = _MESES_PT[hoje.month]
     return _RESOLVER_STATIC.format(
-        mes_atual=hoje.strftime("%B de %Y"),
+        mes_atual=f"{mes_pt} de {hoje.year}",
         data_atual=hoje.strftime("%Y-%m-%d"),
-    ) + f"\n\nHoje é {hoje.strftime('%Y-%m-%d')} ({hoje.strftime('%A')})."
+    ) + f"\n\nHoje é {hoje.strftime('%Y-%m-%d')}."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -258,7 +325,13 @@ CONTEXTO TEMPORAL
 ▶ DATAS EXPLÍCITAS (período já resolvido na instrução):
   É PROIBIDO usar CURRENT_DATE ou subtração matemática.
   - "janeiro de 2026" → data_emissao >= '2026-01-01' AND data_emissao < '2026-02-01'
+  - "fevereiro de 2026" → data_emissao >= '2026-02-01' AND data_emissao < '2026-03-01'
   - "ano de 2025"     → EXTRACT(YEAR FROM data_emissao) = 2025
+  - "ano de 2026"     → EXTRACT(YEAR FROM data_emissao) = 2026
+  ⚠ CRÍTICO — MÊS EXPLÍCITO: NUNCA use EXTRACT(YEAR) para consulta de mês específico.
+    Use SEMPRE o padrão de intervalo de datas (>= e <).
+    O ANO no intervalo de datas DEVE ser exatamente o mesmo ano mencionado na instrução.
+    "janeiro de 2026" → '2026-01-01' e '2026-02-01' (NÃO '2025-01-01' e '2025-02-01')
 
 ════════════════════════════════════════
 FONTES DE DADOS
@@ -371,6 +444,13 @@ WHERE data_emissao >= '2026-01-01' AND data_emissao < '2026-02-01'
 GROUP BY "Objeto"
 ORDER BY faturamento_total DESC
 LIMIT 20;
+
+---
+
+-- Faturamento total de janeiro de 2026
+SELECT SUM(faturamento) AS faturamento_total
+FROM integralmix.agg_vendas_diarias
+WHERE data_emissao >= '2026-01-01' AND data_emissao < '2026-02-01';
 
 ---
 
@@ -513,6 +593,16 @@ ORDER BY DATE_TRUNC('month', data_emissao) ASC;
 
 ---
 
+-- Evolução mensal do faturamento no ano de 2025
+SELECT TO_CHAR(DATE_TRUNC('month', data_emissao), 'MM/YYYY') AS periodo,
+       SUM(faturamento)                                        AS faturamento_total
+FROM integralmix.agg_vendas_diarias
+WHERE EXTRACT(YEAR FROM data_emissao) = 2025
+GROUP BY DATE_TRUNC('month', data_emissao)
+ORDER BY DATE_TRUNC('month', data_emissao) ASC;
+
+---
+
 -- Evolução mensal dos últimos 6 meses
 SELECT TO_CHAR(DATE_TRUNC('month', data_emissao), 'MM/YYYY') AS periodo,
        SUM(faturamento)                                        AS faturamento_total
@@ -520,7 +610,30 @@ FROM integralmix.agg_vendas_diarias
 WHERE data_emissao >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months'
   AND data_emissao <  DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'
 GROUP BY DATE_TRUNC('month', data_emissao)
-ORDER BY DATE_TRUNC('month', data_emissao) ASC;"""
+ORDER BY DATE_TRUNC('month', data_emissao) ASC;
+
+---
+
+-- Evolução mensal do ticket médio no ano de 2025
+-- ⚠ Use fVendas (não agg_vendas_diarias) — ticket médio exige COUNT(DISTINCT "Lancamento")
+-- ⚠ Alias da métrica DEVE ser "faturamento" para o extrator de card reconhecer a série
+SELECT TO_CHAR(DATE_TRUNC('month', "DataEmissao"), 'MM/YYYY') AS periodo,
+       SUM("Valor") / NULLIF(COUNT(DISTINCT "Lancamento"), 0)  AS faturamento
+FROM integralmix."fVendas"
+WHERE EXTRACT(YEAR FROM "DataEmissao") = 2025
+GROUP BY DATE_TRUNC('month', "DataEmissao")
+ORDER BY DATE_TRUNC('month', "DataEmissao") ASC;
+
+---
+
+-- Evolução mensal do ticket médio nos últimos 6 meses
+SELECT TO_CHAR(DATE_TRUNC('month', "DataEmissao"), 'MM/YYYY') AS periodo,
+       SUM("Valor") / NULLIF(COUNT(DISTINCT "Lancamento"), 0)  AS faturamento
+FROM integralmix."fVendas"
+WHERE "DataEmissao" >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months'
+  AND "DataEmissao" <  DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'
+GROUP BY DATE_TRUNC('month', "DataEmissao")
+ORDER BY DATE_TRUNC('month', "DataEmissao") ASC;"""
 
 
 def _build_sql_prompt() -> str:
@@ -629,9 +742,10 @@ def _var_arrow(pct: float) -> str:
     return "▲" if pct >= 0 else "▼"
 
 
-def render_card(card_data: dict) -> str:
+def render_card(card_data: dict, intent: str = "") -> str:
     """Monta o card Markdown a partir do JSON estruturado.
-    Cada campo é exibido apenas se não for None — Python decide, não o LLM."""
+    Cada campo é exibido apenas se não for None — Python decide, não o LLM.
+    intent é usado para detectar o tipo de métrica na série temporal."""
 
     serie        = card_data.get("serie_temporal")       or []
     drivers      = card_data.get("top_drivers")          or []
@@ -643,9 +757,26 @@ def render_card(card_data: dict) -> str:
 
     # ── MODO SÉRIE TEMPORAL (3+ períodos) ────────────────────────────────────
     if len(serie) >= 3:
-        total = sum(s.get("faturamento", 0) for s in serie)
-        lines = [f"### 📈 Evolução de Faturamento\n**Total do período: {_fmt_brl(total)}**\n"]
-        lines.append("| Período | Faturamento | Var. Mês |")
+        is_ticket = "ticket" in intent.lower()
+
+        if is_ticket:
+            # Ticket médio não pode ser somado — exibe o valor do último período
+            ultimo_val = serie[-1].get("faturamento")
+            if ultimo_val is None:
+                return "⚠️ Não foi possível renderizar a série — dados incompletos retornados pelo extrator."
+            header_val = f"Ticket médio em {serie[-1]['periodo']}: {_fmt_brl(ultimo_val)}"
+            titulo     = "### 🎟️ Evolução do Ticket Médio"
+            col_label  = "Ticket Médio"
+            label_tend = "Evolução do ticket"
+        else:
+            total      = sum(s.get("faturamento", 0) for s in serie)
+            header_val = f"Total do período: {_fmt_brl(total)}"
+            titulo     = "### 📈 Evolução de Faturamento"
+            col_label  = "Faturamento"
+            label_tend = "Tendência"
+
+        lines = [f"{titulo}\n**{header_val}**\n"]
+        lines.append(f"| Período | {col_label} | Var. Mês |")
         lines.append("|:-------:|------------:|:--------:|")
         for i, s in enumerate(serie):
             v = s.get("faturamento", 0)
@@ -664,7 +795,7 @@ def render_card(card_data: dict) -> str:
             v0, vn = serie[0]["faturamento"], serie[-1]["faturamento"]
             trend  = ((vn - v0) / v0) * 100
             arrow  = "📈" if trend >= 0 else "📉"
-            lines.append(f"\n{arrow} **Tendência {serie[0]['periodo']} → {serie[-1]['periodo']}: {_fmt_pct(trend)}**")
+            lines.append(f"\n{arrow} **{label_tend} {serie[0]['periodo']} → {serie[-1]['periodo']}: {_fmt_pct(trend)}**")
         return "\n".join(lines)
 
     # ── MODO COMPARAÇÃO (2 períodos via serie_temporal) ───────────────────────
@@ -877,6 +1008,13 @@ def resolve_intent(history: list[dict]) -> str:
         ],
         temperature=0,
     ).choices[0].message.content.strip()
+
+    # Remove prefixos acidentais de label de caso (ex: "C: ", "A: ") que o modelo
+    # às vezes inclui na resposta. Protege os prefixos funcionais com dois-pontos.
+    _FUNCTIONAL_PREFIXES = ("RESPOSTA_DIRETA:", "CLARIFICACAO:", "RELATORIO_COMPLETO:")
+    if not any(resolved.upper().startswith(p) for p in _FUNCTIONAL_PREFIXES):
+        import re
+        resolved = re.sub(r'^[A-D]:\s*', '', resolved)
 
     # Melhoria #8: log estruturado da intent resolvida para diagnóstico em produção
     last_user_msg = next(

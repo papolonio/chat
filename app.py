@@ -74,7 +74,7 @@ def _executar_dimensao(label: str, intent: str) -> tuple[str, str]:
         if not rows:
             return label, f"{cabecalho}\n\n_Sem dados disponíveis para {label} neste período._"
         card_data = extract_card_data(intent, rows)
-        return label, f"{cabecalho}\n\n{render_card(card_data)}"
+        return label, f"{cabecalho}\n\n{render_card(card_data, intent)}"
     except Exception as exc:
         log.error("Relatório completo — falha em '%s': %s", label, exc)
         return label, f"{cabecalho}\n\n⚠️ Não foi possível carregar dados de **{label}** para este período."
@@ -192,7 +192,7 @@ def chat():
     #    LLM extrai apenas JSON com os números que existem nos dados.
     #    Python monta o card — zero possibilidade de alucinação de valores.
     card_data = extract_card_data(resolved, rows)
-    answer = render_card(card_data)
+    answer = render_card(card_data, resolved)
 
     # Fallback: se extração falhou completamente, usa str dos dados brutos
     if not answer.strip() or answer == "### 🎯 Resumo Executivo":
