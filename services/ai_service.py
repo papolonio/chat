@@ -444,8 +444,14 @@ Extraia os dados e retorne APENAS um JSON válido neste schema exato:
 {
   "faturamento_total": <float ou null>,
   "qtd_pedidos": <int ou null>,
+  "total_itens": <int ou null>,
+  "variacao_ano_anterior": <float ou null>,
   "top_drivers": [
-    {"nome": "<string>", "faturamento": <float>, "qtd_pedidos": <int ou null>}
+    {
+      "nome": "<string>",
+      "faturamento": <float>,
+      "qtd_pedidos": <int ou null>
+    }
   ],
   "serie_temporal": [
     {"periodo": "<MM/YYYY>", "faturamento": <float>}
@@ -458,25 +464,32 @@ REGRAS CRÍTICAS — TOLERÂNCIA ZERO PARA ALUCINAÇÃO:
 - faturamento_total:
     PRIORIDADE 1: Se existir a coluna "total_geral_faturamento" nos dados, use esse valor.
     PRIORIDADE 2: Caso contrário, some todos os valores de "faturamento_total" ou "faturamento".
-    EXCEÇÃO: Se for série temporal (ver abaixo), use o valor do ÚLTIMO período (mais recente).
+    EXCEÇÃO: Se for série temporal, use o valor do ÚLTIMO período (mais recente).
 
 - qtd_pedidos:
     PRIORIDADE 1: Se existir "total_geral_pedidos", use esse valor.
     PRIORIDADE 2: Some os valores de pedidos das linhas, ou null se não existir.
 
-- serie_temporal: preencha quando os dados contêm uma coluna "periodo" com valores de mês/ano
-  (ex: "01/2026", "02/2026") E há 2 ou mais linhas — cada uma é um período de tempo.
-  → Ordene do mais antigo ao mais recente (ordem cronológica crescente).
-  → "periodo" deve ser o valor da coluna "periodo" tal como está nos dados.
-  → Neste caso: top_drivers = [] e faturamento_total = valor do período mais recente.
+- total_itens: número total de linhas retornadas pela query (len dos dados recebidos),
+  independente do truncamento. Use sempre que houver agrupamento por entidade.
+  Ex: se vieram 20 linhas de produtos → total_itens = 20. Se não há agrupamento → null.
+
+- variacao_ano_anterior: se os dados contiverem duas colunas de faturamento — uma do período
+  atual e uma do ano anterior (ex: "faturamento_atual" e "faturamento_anterior") — calcule
+  (atual - anterior) / anterior. Caso contrário → null. NUNCA invente o valor anterior.
+
+- serie_temporal: preencha quando os dados contêm coluna "periodo" com valores MM/YYYY
+  e há 2 ou mais linhas de períodos de tempo.
+  → Ordene do mais antigo ao mais recente.
+  → Neste caso: top_drivers = [] e faturamento_total = valor do último período.
 
 - top_drivers: se os dados têm agrupamento por ENTIDADE (produto, vendedor, estado, cidade,
-  cliente — NÃO períodos de tempo), inclua os 3 primeiros itens por maior faturamento.
+  cliente — NÃO períodos de tempo), inclua TODOS os itens recebidos (até 20).
   "nome" = VALOR real da célula (ex: "Fortaleza", "João Silva"), NUNCA o nome da coluna.
-  Se não há agrupamento por entidade ou é série temporal, use [].
+  Se não há agrupamento por entidade ou é série temporal → use [].
 
 - Retorne APENAS o JSON, sem markdown, sem explicações.
-- NÃO inclua o campo ticket_medio — ele é calculado externamente."""
+- NÃO inclua ticket_medio nem ticket_medio_item — calculados externamente."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -498,15 +511,26 @@ def _is_period_str(s: str) -> bool:
     return bool(re.match(r'^\d{2}/\d{4}$', str(s)) or re.match(r'^\d{4}-\d{2}', str(s)))
 
 
+def _fmt_pct(value: float) -> str:
+    """Formata percentual com sinal e uma casa decimal. Ex: +12,3% ou -4,1%"""
+    return f"{value:+.1f}%".replace(".", ",")
+
+
+def _var_arrow(pct: float) -> str:
+    return "▲" if pct >= 0 else "▼"
+
+
 def render_card(card_data: dict) -> str:
     """Monta o card Markdown a partir do JSON estruturado.
     Cada campo é exibido apenas se não for None — Python decide, não o LLM."""
 
-    serie   = card_data.get("serie_temporal") or []
-    drivers = card_data.get("top_drivers")    or []
-    fat     = card_data.get("faturamento_total")
-    ped     = card_data.get("qtd_pedidos")
-    tkt     = card_data.get("ticket_medio")
+    serie        = card_data.get("serie_temporal")       or []
+    drivers      = card_data.get("top_drivers")          or []
+    fat          = card_data.get("faturamento_total")
+    ped          = card_data.get("qtd_pedidos")
+    tkt          = card_data.get("ticket_medio")
+    total_itens  = card_data.get("total_itens")
+    var_yoy      = card_data.get("variacao_ano_anterior")
 
     # ── MODO SÉRIE TEMPORAL (3+ períodos) ────────────────────────────────────
     if len(serie) >= 3:
@@ -521,9 +545,8 @@ def render_card(card_data: dict) -> str:
             else:
                 prev = serie[i - 1].get("faturamento", 0)
                 if prev and prev > 0:
-                    pct = ((v - prev) / prev) * 100
-                    arrow = "▲" if pct >= 0 else "▼"
-                    var_str = f"{arrow} {pct:+.1f}%"
+                    pct     = ((v - prev) / prev) * 100
+                    var_str = f"{_var_arrow(pct)} {_fmt_pct(pct)}"
                 else:
                     var_str = "—"
             lines.append(f"| {s['periodo']} | {_fmt_brl(v)} | {var_str} |")
@@ -532,14 +555,14 @@ def render_card(card_data: dict) -> str:
             v0, vn = serie[0]["faturamento"], serie[-1]["faturamento"]
             trend  = ((vn - v0) / v0) * 100
             arrow  = "📈" if trend >= 0 else "📉"
-            lines.append(f"\n{arrow} **Tendência {serie[0]['periodo']} → {serie[-1]['periodo']}: {trend:+.1f}%**")
+            lines.append(f"\n{arrow} **Tendência {serie[0]['periodo']} → {serie[-1]['periodo']}: {_fmt_pct(trend)}**")
         return "\n".join(lines)
 
     # ── MODO COMPARAÇÃO (2 períodos via serie_temporal) ───────────────────────
     if len(serie) == 2:
         v_ant   = serie[0].get("faturamento", 0)
         v_atual = serie[1].get("faturamento", 0)
-        lines = ["### 📊 Comparativo de Períodos"]
+        lines   = ["### 📊 Comparativo de Períodos"]
         lines.append(f"- 🔵 {serie[0]['periodo']}: {_fmt_brl(v_ant)}")
         lines.append(f"- 🟢 {serie[1]['periodo']}: {_fmt_brl(v_atual)}")
         if v_ant > 0:
@@ -547,30 +570,23 @@ def render_card(card_data: dict) -> str:
             diff    = v_atual - v_ant
             arrow   = "📈" if var_pct >= 0 else "📉"
             sinal   = "+" if diff >= 0 else ""
-            lines.append(f"\n{arrow} Variação: **{var_pct:+.1f}%** ({sinal}{_fmt_brl(diff)})")
+            lines.append(f"\n{arrow} Variação: **{_fmt_pct(var_pct)}** ({sinal}{_fmt_brl(diff)})")
         return "\n".join(lines)
 
-    # ── MODO CARD EXECUTIVO (entidades / total simples) ───────────────────────
-    lines = ["### 🎯 Resumo Executivo"]
-    if fat is not None:
-        lines.append(f"- 💰 Faturamento: {_fmt_brl(fat)}")
-    if ped is not None:
-        lines.append(f"- 📦 Volume: {_fmt_int(int(ped))} pedidos")
-    if tkt is not None:
-        lines.append(f"- 🎟️ Ticket Médio: {_fmt_brl(tkt)}")
-
+    # ── MODO RELATÓRIO (drivers por entidade) ────────────────────────────────
     if drivers:
         fat_values = [d.get("faturamento") for d in drivers]
+
+        # Fallback: drivers com períodos (comparação sem serie_temporal)
         if (len(drivers) == 2
                 and all(v is not None for v in fat_values)
                 and all(_is_period_str(d.get("nome", "")) for d in drivers)):
-            # Fallback: drivers foram populados com períodos (comparação sem serie_temporal)
             log.warning(
                 "render_card: fallback de comparação via top_drivers ativado. "
                 "Verifique se o Prompt C está populando serie_temporal corretamente."
             )
             v_ant, v_atual = fat_values[0], fat_values[1]
-            lines.append("\n### 📊 Comparativo de Períodos")
+            lines = ["### 📊 Comparativo de Períodos"]
             lines.append(f"- 🔵 {drivers[0]['nome']}: {_fmt_brl(v_ant)}")
             lines.append(f"- 🟢 {drivers[1]['nome']}: {_fmt_brl(v_atual)}")
             if v_ant and v_ant > 0:
@@ -578,20 +594,82 @@ def render_card(card_data: dict) -> str:
                 diff    = v_atual - v_ant
                 arrow   = "📈" if var_pct >= 0 else "📉"
                 sinal   = "+" if diff >= 0 else ""
-                lines.append(f"\n{arrow} Variação: **{var_pct:+.1f}%** ({sinal}{_fmt_brl(diff)})")
-        else:
-            medals = ["🥇 1º", "🥈 2º", "🥉 3º"]
-            lines.append("\n### 🏆 Top 3 Drivers")
-            for i, d in enumerate(drivers[:3]):
-                medal = medals[i] if i < len(medals) else f"{i + 1}º"
-                f_val = d.get("faturamento")
-                p_val = d.get("qtd_pedidos")
-                if f_val is not None:
-                    lines.append(f"{medal} - {d['nome']} - {_fmt_brl(f_val)}")
-                elif p_val is not None:
-                    lines.append(f"{medal} - {d['nome']} - {_fmt_int(int(p_val))} pedidos")
-                else:
-                    lines.append(f"{medal} - {d['nome']}")
+                lines.append(f"\n{arrow} Variação: **{_fmt_pct(var_pct)}** ({sinal}{_fmt_brl(diff)})")
+            return "\n".join(lines)
+
+        # ── Card de KPIs globais (cabeçalho do relatório) ──────────────────
+        lines = ["### 🎯 Visão Geral"]
+        if fat is not None:
+            fat_line = f"- 💰 **Faturamento Total:** {_fmt_brl(fat)}"
+            if var_yoy is not None:
+                arrow    = "📈" if var_yoy >= 0 else "📉"
+                fat_line += f"  {arrow} *vs. ano anterior: {_fmt_pct(var_yoy)}*"
+            lines.append(fat_line)
+        if ped is not None:
+            lines.append(f"- 📦 **Pedidos:** {_fmt_int(int(ped))}")
+        if tkt is not None:
+            lines.append(f"- 🎟️ **Ticket Médio:** {_fmt_brl(tkt)}")
+
+        # ── Tabela Top 5 com participação, pedidos e ticket médio ─────────
+        # Calcula participação com base no total real (fat ou soma dos drivers)
+        base_fat = fat or sum(d.get("faturamento", 0) for d in drivers)
+
+        # Cabeçalho dinâmico: inclui colunas apenas se houver dados
+        has_pedidos = any(d.get("qtd_pedidos") is not None for d in drivers[:5])
+        has_ticket  = any(d.get("ticket_medio_item") is not None for d in drivers[:5])
+
+        top_label = "Top 5"
+        if total_itens is not None and total_itens > 5:
+            top_label = f"Top 5 de {_fmt_int(total_itens)}"
+
+        lines.append(f"\n### 🏆 {top_label}")
+
+        # Monta cabeçalho da tabela
+        header = "| # | Item | Faturamento | Part.% |"
+        sep    = "|:-:|:-----|------------:|-------:|"
+        if has_pedidos:
+            header += " Pedidos |"
+            sep    += "--------:|"
+        if has_ticket:
+            header += " Ticket Médio |"
+            sep    += "-------------:|"
+        lines.append(header)
+        lines.append(sep)
+
+        medals = ["🥇", "🥈", "🥉", "4º", "5º"]
+        for i, d in enumerate(drivers[:5]):
+            medal  = medals[i] if i < len(medals) else f"{i+1}º"
+            f_val  = d.get("faturamento") or 0
+            part   = (f_val / base_fat * 100) if base_fat > 0 else 0
+            p_val  = d.get("qtd_pedidos")
+            tk_val = d.get("ticket_medio_item")
+
+            row = f"| {medal} | {d['nome']} | {_fmt_brl(f_val)} | {part:.1f}% |"
+            if has_pedidos:
+                row += f" {_fmt_int(int(p_val)) if p_val is not None else '—'} |"
+            if has_ticket:
+                row += f" {_fmt_brl(tk_val) if tk_val is not None else '—'} |"
+            lines.append(row)
+
+        # Rodapé: concentração dos top 5
+        if base_fat > 0 and len(drivers) >= 2:
+            conc = sum(d.get("faturamento", 0) for d in drivers[:5]) / base_fat * 100
+            lines.append(f"\n> 💡 Os top 5 representam **{conc:.1f}%** do faturamento total do período.")
+
+        return "\n".join(lines)
+
+    # ── MODO CARD EXECUTIVO SIMPLES (total sem agrupamento) ──────────────────
+    lines = ["### 🎯 Resumo Executivo"]
+    if fat is not None:
+        fat_line = f"- 💰 **Faturamento:** {_fmt_brl(fat)}"
+        if var_yoy is not None:
+            arrow    = "📈" if var_yoy >= 0 else "📉"
+            fat_line += f"  {arrow} *vs. ano anterior: {_fmt_pct(var_yoy)}*"
+        lines.append(fat_line)
+    if ped is not None:
+        lines.append(f"- 📦 **Pedidos:** {_fmt_int(int(ped))}")
+    if tkt is not None:
+        lines.append(f"- 🎟️ **Ticket Médio:** {_fmt_brl(tkt)}")
 
     return "\n".join(lines)
 
@@ -613,13 +691,16 @@ def _rows_limit_for_intent(standalone_intent: str) -> int:
 
 
 def _calculate_ticket_medio(card_data: dict) -> dict:
-    """Melhoria #4: calcula ticket_medio em Python, sem depender do LLM."""
+    """Calcula ticket_medio global e ticket_medio_item por driver, tudo em Python."""
     fat = card_data.get("faturamento_total")
     ped = card_data.get("qtd_pedidos")
-    if fat is not None and ped is not None and ped > 0:
-        card_data["ticket_medio"] = fat / ped
-    else:
-        card_data["ticket_medio"] = None
+    card_data["ticket_medio"] = (fat / ped) if (fat and ped and ped > 0) else None
+
+    for d in card_data.get("top_drivers") or []:
+        f_val = d.get("faturamento")
+        p_val = d.get("qtd_pedidos")
+        d["ticket_medio_item"] = (f_val / p_val) if (f_val and p_val and p_val > 0) else None
+
     return card_data
 
 
