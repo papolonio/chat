@@ -29,6 +29,10 @@ def execute_query(sql: str) -> list[dict]:
 
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             log.info("Executando SQL:\n%s", sql)
+            # Validação: apenas SELECT e WITH (CTEs) são permitidos
+            clean = sql.strip().lstrip(';').strip().upper()
+            if not (clean.startswith('SELECT') or clean.startswith('WITH')):
+                raise QueryError(sql=sql, db_error="Apenas queries SELECT/WITH são permitidas.")
             cur.execute(sql)
             rows = cur.fetchall()
             log.info("Query retornou %d linha(s).", len(rows))

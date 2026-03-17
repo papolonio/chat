@@ -29,7 +29,8 @@ redis_client = redis.Redis(
     db=0,
     decode_responses=True,
 )
-SESSION_TTL = 3600  # 1 hora
+SESSION_TTL = 3600       # 1 hora
+MAX_HISTORY_MSGS = 10    # 5 turnos de conversa (user + assistant)
 
 
 def _get_history(session_id: str) -> list[dict]:
@@ -66,11 +67,11 @@ def chat():
     history.append({"role": "user", "content": message})
 
     # 2. RESOLUÇÃO DE INTENÇÃO — roteamento + isolamento de contexto
-    #    O resolvedor lê o histórico bruto e devolve:
-    #      - RESPOSTA_DIRETA: <texto>  → pergunta conversacional
-    #      - CLARIFICACAO: <texto>     → pergunta ambígua
-    #      - <frase standalone>        → intent limpo para geração de SQL
-    resolved = resolve_intent(history)
+    #    Trunca o histórico antes de enviar à IA para evitar estouro de tokens
+    trimmed = history[-MAX_HISTORY_MSGS:] if len(history) > MAX_HISTORY_MSGS else history
+    if len(history) > MAX_HISTORY_MSGS:
+        log.info("Histórico truncado: %d → %d msgs para o resolvedor.", len(history), MAX_HISTORY_MSGS)
+    resolved = resolve_intent(trimmed)
     log.info("Intent resolvida: %s", resolved[:120])
 
     if resolved.upper().startswith("RESPOSTA_DIRETA:"):
@@ -131,10 +132,20 @@ def chat():
         log.warning("Card vazio após extração. Usando fallback de dados brutos.")
         answer = f"Dados retornados:\n{rows}"
 
+    # Gera chart_data se houver série temporal (para gráfico no frontend)
+    serie = card_data.get("serie_temporal") or []
+    chart_data = None
+    if len(serie) >= 2:
+        chart_data = {
+            "labels": [s["periodo"] for s in serie],
+            "values": [s.get("faturamento", 0) for s in serie],
+        }
+        log.info("chart_data gerado com %d pontos.", len(serie))
+
     history.append({"role": "assistant", "content": answer})
     _save_history(session_id, history)
 
-    return jsonify({"answer": answer})
+    return jsonify({"answer": answer, "chart_data": chart_data})
 
 
 if __name__ == "__main__":
