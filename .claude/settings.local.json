@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(pip show:*)",
+      "Bash(python ingest_fVendas.py)",
+      "Bash(python -c \"import sys; print\\(sys.executable\\)\")",
+      "Bash(python -c \"import dotenv\")",
+      "Bash(python -m pip show python-dotenv)",
+      "Bash(python -m pip install \"SQLAlchemy>=2.0.30\" \"psycopg2-binary>=2.9.9\" \"pymssql>=2.3.1\" \"python-dotenv>=1.0.1\")",
+      "Bash(python -m pip install \"SQLAlchemy>=2.0.30\" \"psycopg2-binary>=2.9.9\" \"pymssql>=2.3.1\" \"python-dotenv>=1.0.1\" --quiet)",
+      "Bash(python -c \"import dotenv, sqlalchemy, psycopg2, pymssql; print\\(''OK''\\)\")",
+      "Bash(python -:*)",
+      "Bash(2)"
+    ]
+  }
+}
